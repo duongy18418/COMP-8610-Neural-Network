@@ -1,0 +1,8 @@
+opencv-python
+numpy
+torch
+transformers
+einops
+timm
+pathlib
+sklearn
