@@ -6,3 +6,7 @@ einops
 timm
 pathlib
 sklearn
+imutils
+torchvision
+lightning
+torchmetrics
