@@ -221,7 +221,8 @@ def get_seg_lightning_modules(data_paths,
                               accelerator='mps', 
                               fast=True, 
                               ckpt=None,
-                              batch_size=2, 
+                              batch_size=2,
+                              devices=[0, 1], # For gpu
                               max_epochs=10, 
                               n_classes=2, 
                               learning_rate=0.001):
@@ -271,7 +272,7 @@ def get_seg_lightning_modules(data_paths,
     else:
         trainer = L.Trainer(fast_dev_run=fast, 
                             logger=logger, accelerator="gpu",
-                            devices=[0,1], 
+                            devices=devices, 
                             max_epochs=max_epochs)
     
     return data_module, module, trainer
