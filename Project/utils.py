@@ -1,4 +1,5 @@
 from imutils import paths
+from lightning.pytorch.callbacks import EarlyStopping
 from sklearn.model_selection import train_test_split
 import pandas as pd
 from torchvision.io import read_image, ImageReadMode
@@ -171,9 +172,10 @@ def get_segmentation_plot(
         out = trained_model(test_image.to(device).unsqueeze(0))[0]
         prediction = torch.argmax(out, 0)
         fig, ax = plt.subplots(1, 3, figsize=(12, 8))
+
         ax[0].imshow(test_image.permute(1, 2, 0))
-        ax[1].imshow(test_mask, cmap='gray', vmin=0, vmax=1, origin='lower')
-        ax[2].imshow(prediction.detach().cpu().numpy(), cmap='gray', vmin=0, vmax=1, origin='lower')
+        ax[1].imshow(test_mask, cmap='Blues', vmin=0, vmax=1)
+        ax[2].imshow(prediction.detach().cpu().numpy(), cmap='Blues', vmin=0, vmax=1)
 
         ax[0].set_title('Test Image')
         ax[1].set_title('Actual Mask')
@@ -224,8 +226,10 @@ def get_seg_lightning_modules(data_paths,
                               batch_size=2,
                               devices=[0, 1], # For gpu
                               max_epochs=10, 
+                              num_workers=4,
                               n_classes=2, 
-                              learning_rate=0.001):
+                              callbacks=[EarlyStopping('val_loss', patience=3)],
+                              learning_rate=1e-5):
     """
     Agrs:
         - data_paths: Dictionary to mask and imgs datasets
@@ -248,6 +252,7 @@ def get_seg_lightning_modules(data_paths,
     """
     data_module = SegDM(batch_size=batch_size, 
                         collate_fn=collate_fn, 
+                        num_workers=num_workers,
                         **data_paths)
     logger = CSVLogger("logs", name=model_name)
 
@@ -268,11 +273,13 @@ def get_seg_lightning_modules(data_paths,
     if accelerator == "mps" or accelerator == "cpu":
         trainer = L.Trainer(fast_dev_run=fast, 
                             logger=logger, 
+                            callbacks=callbacks,
                             max_epochs=max_epochs)
     else:
         trainer = L.Trainer(fast_dev_run=fast, 
                             logger=logger, accelerator="gpu",
                             devices=devices, 
+                            callbacks=callbacks,
                             max_epochs=max_epochs)
     
     return data_module, module, trainer
