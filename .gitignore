@@ -1,3 +1,5 @@
 Project/datasets/
-Project/logs/
-Project/test_results/
+Project/__pycache__/
+Project/logs/*/*.ckpt
+Project/logs/*/version_*/*.yaml
+Project/logs/*/version_*/checkpoints/*.ckpt
