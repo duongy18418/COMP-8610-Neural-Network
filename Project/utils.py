@@ -1,4 +1,5 @@
 from imutils import paths
+import keras
 from lightning.pytorch.callbacks import EarlyStopping
 from sklearn.model_selection import train_test_split
 import pandas as pd
@@ -8,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch
 import lightning as L
 import pandas as pd
-from torchmetrics.classification import BinaryAccuracy, BinaryF1Score, BinaryPrecision, BinaryRecall
+from torchmetrics.classification import BinaryAccuracy, BinaryF1Score, BinaryPrecision, BinaryRecall, Dice
 from torchmetrics.segmentation import MeanIoU
 import matplotlib.pyplot as plt
 import torch
@@ -95,35 +96,62 @@ class SegModule(L.LightningModule):
         self.lr = learning_rate
         self.result_path=result_path
         self.num_classes = num_classes
-        self.test_results = {'f1': [], 'accuracy': [], 'precision': [], 'recall': [], 'mean_iou': []}
+        self.test_results = {
+            'f1': [], 
+            'accuracy': [], 
+            'precision': [], 
+            'recall': [], 
+            'mean_iou': [],
+            'dice': []
+        }
         self.f1 = BinaryF1Score()
         self.accuracy = BinaryAccuracy()
         self.recall = BinaryRecall()
         self.precision = BinaryPrecision()
         self.mean_iou = MeanIoU(self.num_classes)
-
+        self.dice = Dice(num_classes=self.num_classes)
+        self.val_ce_loss = []
+        self.train_ce_loss = []
+        self.train_dice_score = []
+        self.val_dice_score = []
         self.save_hyperparameters(ignore=['model', 'result_path'])
     
     def common_steps(self, batch):
         imgs, masks = batch
-        preds = self.model(imgs)
-        loss = self.loss_fn(preds, masks)
+        logits = self.model(imgs)
+        loss = self.loss_fn(logits, masks)            
+        preds = torch.argmax(logits, dim=1)
         return loss, preds, masks
 
     def training_step(self, batch):
-        loss, _, _ = self.common_steps(batch)
-        self.log('train_loss', loss, sync_dist=True, prog_bar=True)
+        loss, preds, masks = self.common_steps(batch)
+        dice_score = self.dice(preds, masks)
+
+        self.log_dict(
+            {'train_ce_loss': loss, 'train_dice_score': dice_score},
+            sync_dist=True,
+            prog_bar=True,
+            on_step=False, 
+            on_epoch=True,
+        )
+        
         return loss
-    
+            
     def validation_step(self, batch):
-        loss, _, _ = self.common_steps(batch)
-        self.log('val_loss', loss, sync_dist=True, prog_bar=True)
+        loss, preds, masks = self.common_steps(batch)
+        dice_score = self.dice(preds, masks)
+
+        self.log_dict(
+            {'val_ce_loss': loss, 'val_dice_score': dice_score},
+            sync_dist=True,
+            prog_bar=True,
+            on_step=False, 
+            on_epoch=True
+        )
         return loss
     
     def test_step(self, batch):
         loss, preds, masks = self.common_steps(batch)
-        self.log('test_loss', loss, sync_dist=True)
-        preds = torch.argmax(preds, dim=1)
         for metric_name in self.test_results.keys():
             metric = getattr(self, metric_name)
             self.test_results[metric_name].append(
@@ -133,19 +161,19 @@ class SegModule(L.LightningModule):
     
     def predict_step(self, test_image):
         test_image = test_image.unsqueeze(0)
-        # Generate prediction
         output = self.model(test_image)
         prediction = torch.argmax(output, 0)
         return prediction
     
     def on_test_end(self):
         df = pd.DataFrame(self.test_results)
-        df.to_csv(self.result_path, index=None)
+        # df.to_csv(self.result_path, index=None)
         print('f1:', df['f1'].mean())
         print('accuracy:', df['accuracy'].mean())
         print('precision:', df['precision'].mean())
         print('recall:', df['recall'].mean())
         print('mean_iou:', df['mean_iou'].mean())
+        print('dice:', df['dice'].mean())
     
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.lr)
@@ -171,15 +199,21 @@ def get_segmentation_plot(
         test_image, test_mask = test_data[i]
         out = trained_model(test_image.to(device).unsqueeze(0))[0]
         prediction = torch.argmax(out, 0)
-        fig, ax = plt.subplots(1, 3, figsize=(12, 8))
+        prediction = prediction.detach().cpu().numpy()
+
+        fig, ax = plt.subplots(1, 4, figsize=(15, 10))
 
         ax[0].imshow(test_image.permute(1, 2, 0))
-        ax[1].imshow(test_mask, cmap='Blues', vmin=0, vmax=1)
-        ax[2].imshow(prediction.detach().cpu().numpy(), cmap='Blues', vmin=0, vmax=1)
+        ax[1].imshow((test_mask + -1.0) * -1, cmap='Blues', vmin=0, vmax=1)
+        ax[2].imshow((prediction + -1.0) * -1, cmap='Blues',  vmin=0, vmax=1)
+        ax[3].imshow((test_mask + -1.0) * -1, cmap = "Blues", alpha = 0.5, vmin=0, vmax=1)
+        ax[3].imshow((prediction + -1.0) * -1, cmap = "PuBu", alpha = 0.3, vmin=0, vmax=1)
+    
 
         ax[0].set_title('Test Image')
         ax[1].set_title('Actual Mask')
         ax[2].set_title('Predicted Mask')
+        ax[3].set_title('Overlap')
 
         figs.append(fig)
 
@@ -259,27 +293,23 @@ def get_seg_lightning_modules(data_paths,
     if not os.path.exists('./results'):
         os.makedirs('./results')
     if ckpt:
-        module = SegModule.load_from_checkpoint(model, 
+        module = SegModule.load_from_checkpoint(checkpoint_path=ckpt,
+                                                 model=model, 
                            num_classes=n_classes,
                            result_path=f'./results/{model_name}.csv', 
                            learning_rate=learning_rate,
-                           checkpoint_path=ckpt)
+                           )
     else:
         module = SegModule(model, 
                            num_classes=n_classes,
                            result_path=f'./results/{model_name}.csv', 
                            learning_rate=learning_rate)
     
-    if accelerator == "mps" or accelerator == "cpu":
-        trainer = L.Trainer(fast_dev_run=fast, 
-                            logger=logger, 
-                            callbacks=callbacks,
-                            max_epochs=max_epochs)
-    else:
-        trainer = L.Trainer(fast_dev_run=fast, 
-                            logger=logger, accelerator="gpu",
-                            devices=devices, 
-                            callbacks=callbacks,
-                            max_epochs=max_epochs)
+    trainer = L.Trainer(fast_dev_run=fast, 
+                        logger=logger, 
+                        accelerator=accelerator,
+                        devices=devices,
+                        callbacks=callbacks,
+                        max_epochs=max_epochs)
     
     return data_module, module, trainer
